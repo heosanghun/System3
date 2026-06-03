@@ -6,12 +6,15 @@ def scale_to_contractive(weight, margin=0.95):
     """
     Enforces contractivity using Spectral Normalization / Singular Value Scaling (C-FIRE).
     Ensures the maximum singular value (spectral norm) of the weight matrix is <= margin.
+    Uses CPU-based SVD to completely prevent CUDA cusolver driver execution crashes on large matrices.
     """
     with torch.no_grad():
-        U, S, Vh = torch.linalg.svd(weight, full_matrices=False)
+        orig_device = weight.device
+        w_cpu = weight.detach().cpu()
+        U, S, Vh = torch.linalg.svd(w_cpu, full_matrices=False)
         S_scaled = torch.clamp(S, max=margin)
-        scaled_weight = torch.matmul(U, torch.matmul(torch.diag(S_scaled), Vh))
-        weight.copy_(scaled_weight)
+        scaled_weight_cpu = torch.matmul(U, torch.matmul(torch.diag(S_scaled), Vh))
+        weight.copy_(scaled_weight_cpu.to(orig_device))
     return weight
 
 class ContrastiveRouter(nn.Module):

@@ -75,23 +75,32 @@ def generate_domain_data(domain_idx, num_samples=250, d=768, out_dim=10, seed=42
     # Normalize X to keep spectral properties bounded
     X = X / (torch.norm(X, dim=-1, keepdim=True) + 1e-6)
 
-    # Split into train (80%) and test (20%)
-    split = int(0.8 * num_samples)
-    train_X, test_X = X[:split], X[split:]
-    train_y, test_y = y[:split], y[split:]
+    # Split into train, val, and test matching paper specifications
+    # Paper: Exactly 500 samples per domain -> 400 Train, 50 Val, 50 Test
+    if num_samples == 500:
+        train_X, val_X, test_X = X[:400], X[400:450], X[450:]
+        train_y, val_y, test_y = y[:400], y[400:450], y[450:]
+    else:
+        # Fallback ratio: 80% / 10% / 10%
+        split_tr = int(0.8 * num_samples)
+        split_va = int(0.9 * num_samples)
+        train_X, val_X, test_X = X[:split_tr], X[split_tr:split_va], X[split_va:]
+        train_y, val_y, test_y = y[:split_tr], y[split_tr:split_va], y[split_va:]
 
-    return train_X, train_y, test_X, test_y
+    return train_X, train_y, val_X, val_y, test_X, test_y
 
-def get_30_domains(num_samples=250, d=768, out_dim=10, seed=42):
+def get_30_domains(num_samples=500, d=768, out_dim=10, seed=42):
     """
-    Returns a dictionary of all 30 domains with train/test splits.
+    Returns a dictionary of all 30 domains with train/val/test splits.
     """
     domains = {}
     for i in range(1, 31):
-        tr_x, tr_y, te_x, te_y = generate_domain_data(i, num_samples, d, out_dim, seed)
+        tr_x, tr_y, va_x, va_y, te_x, te_y = generate_domain_data(i, num_samples, d, out_dim, seed)
         domains[i] = {
             'train_x': tr_x,
             'train_y': tr_y,
+            'val_x': va_x,
+            'val_y': va_y,
             'test_x': te_x,
             'test_y': te_y
         }

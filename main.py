@@ -12,11 +12,11 @@ def main():
     print("==================================================================")
     
     # 1. Dataset Generation: 30 highly heterogeneous sequential domains
-    # We generate 200 samples per domain to make the run fast and robust
-    # while retaining strong high-dimensional orthogonal task structures.
+    # We generate exactly 500 samples per domain to match paper specifications
+    # (400 Train, 50 Val, 50 Test) while retaining strong high-dimensional structures.
     d = 768
     out_dim = 10
-    num_samples = 200
+    num_samples = 500
     seed = 42
     
     print("\n[Step 1] Generating 30-Domain Sequential Reasoning Dataset...")
