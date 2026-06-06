@@ -11,8 +11,8 @@ class SingleExpertTransition(nn.Module):
     def __init__(self, d=768, margin=0.95):
         super().__init__()
         self.d = d
-        self.W_z = nn.Parameter(torch.randn(d, d) * (0.1 / d**0.5))
-        self.W_x = nn.Parameter(torch.randn(d, d) * (0.1 / d**0.5))
+        self.W_z = nn.Parameter(torch.randn(d, d) * (1.0 / d**0.5))
+        self.W_x = nn.Parameter(torch.randn(d, d) * (1.0 / d**0.5))
         self.b = nn.Parameter(torch.zeros(d))
         
         # Enforce contractivity right away
@@ -57,7 +57,7 @@ class WideTransition(nn.Module):
     def __init__(self, d_wide=3072, margin=0.95):
         super().__init__()
         self.d_wide = d_wide
-        self.W_z = nn.Parameter(torch.randn(d_wide, d_wide) * (0.1 / d_wide**0.5))
+        self.W_z = nn.Parameter(torch.randn(d_wide, d_wide) * (1.0 / d_wide**0.5))
         self.b = nn.Parameter(torch.zeros(d_wide))
         scale_to_contractive(self.W_z, margin=margin)
 
@@ -116,6 +116,9 @@ class System3Model(nn.Module):
         # Shared task head
         self.head = nn.Linear(d, out_dim)
         
+        # Track dynamic spawns for optimizer updates
+        self.new_expert_spawned = False
+        
         # Spawn the first expert initially
         self.spawn_new_expert()
 
@@ -142,6 +145,7 @@ class System3Model(nn.Module):
             device = next(self.parameters()).device if next(self.parameters(), None) is not None else torch.device('cpu')
             prototype_embed = torch.randn(128, device=device)
         self.router.add_prototype(prototype_embed)
+        self.new_expert_spawned = True
         
         print(f"--> [System 3] Expert {len(self.experts)} Spawned! Total experts = {len(self.experts)}")
 
@@ -180,8 +184,8 @@ class System3Model(nn.Module):
             # Recompute similarities and gates with the newly added expert
             gates, _, _, routing_loss = self.router(x, training=training)
             
-        # 3. Instantiate the CGM transition operator using the computed gates
-        transition_fn = self.get_cgm_transition(gates)
+        # 3. Instantiate the CGM transition operator using the computed gates (detached to block task gradients)
+        transition_fn = self.get_cgm_transition(gates.detach())
         
         # 4. Wrap with ImplicitDEQLayer and solve for fixed point z*
         deq_layer = ImplicitDEQLayer(
