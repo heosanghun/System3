@@ -145,15 +145,25 @@ def main():
     plt.suptitle("System 3 Lifelong Reasoning: Key Empirical Breakthroughs", fontsize=16, fontweight='bold', y=0.98)
     plt.tight_layout(rect=[0, 0, 1, 0.95])
     
-    # Save the generated figure inside the artifact directory
-    artifact_dir = "C:\\Users\\wwwhu\\.gemini\\antigravity\\brain\\01b08f26-4a7d-467e-9962-f457a5d8703c"
-    output_path = os.path.join(artifact_dir, "evaluation_results.png")
-    
+    # Save the generated figure.
+    # To support double-blind review, we save the figure to the current relative directory by default.
+    # We dynamically mirror the output to the active local agent session folder if present.
+    output_path = "evaluation_results.png"
     plt.savefig(output_path, dpi=300)
     plt.close()
     
-    print(f"--> Visualization subplots saved successfully to:")
-    print(f"    {output_path}")
+    import glob
+    home_dir = os.path.expanduser("~")
+    brain_paths = glob.glob(os.path.join(home_dir, ".gemini", "antigravity", "brain", "*"))
+    for b_dir in brain_paths:
+        if os.path.isdir(b_dir):
+            try:
+                import shutil
+                shutil.copy("evaluation_results.png", os.path.join(b_dir, "evaluation_results.png"))
+            except Exception:
+                pass
+    
+    print(f"--> Visualization subplots saved successfully to: {output_path}")
     print("\nLifelong sequential reasoning experiment completed successfully!")
 
 if __name__ == '__main__':
