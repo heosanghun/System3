@@ -2,35 +2,26 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-def scale_to_contractive(weight, margin=0.95):
+def scale_to_contractive(weight, margin=0.95, n_power_iterations=10):
     """
-    Enforces contractivity using Spectral Normalization / Singular Value Scaling (C-FIRE).
-    Ensures the maximum singular value (spectral norm) of the weight matrix is <= margin.
-    Uses SVD as primary scaling, and falls back to robust power iteration if SVD fails to converge.
+    C-FIRE spectral normalization step (paper Algorithm 2).
+    Estimates the spectral norm sigma_max of the weight matrix via power
+    iteration and rescales W <- W / max(1, sigma_max / margin), enforcing
+    L <= margin < 1 (Banach contractivity).
     """
     with torch.no_grad():
-        orig_device = weight.device
-        w_cpu = weight.detach().cpu()
-        try:
-            U, S, Vh = torch.linalg.svd(w_cpu, full_matrices=False)
-            S_scaled = torch.clamp(S, max=margin)
-            scaled_weight_cpu = torch.matmul(U, torch.matmul(torch.diag(S_scaled), Vh))
-            weight.copy_(scaled_weight_cpu.to(orig_device))
-        except (torch._C._LinAlgError, RuntimeError):
-            # Fallback: Power iteration to scale the spectral norm to <= margin
-            # This is 100% numerically stable and fast.
-            # Initialize random vector
-            u = torch.randn(weight.shape[0], 1, device=orig_device, dtype=weight.dtype)
-            u = u / torch.norm(u)
-            for _ in range(10):
-                v = torch.matmul(weight.t(), u)
-                v = v / torch.norm(v)
-                u = torch.matmul(weight, v)
-                sigma = torch.norm(u)
-                u = u / sigma
-            # If the estimated spectral norm exceeds the margin, scale it down
-            if sigma > margin:
-                weight.copy_(weight * (margin / sigma))
+        u = torch.randn(weight.shape[0], 1, device=weight.device, dtype=weight.dtype)
+        u = u / (torch.norm(u) + 1e-12)
+        v = None
+        for _ in range(n_power_iterations):
+            v = torch.matmul(weight.t(), u)
+            v = v / (torch.norm(v) + 1e-12)
+            u = torch.matmul(weight, v)
+            u_norm = torch.norm(u)
+            u = u / (u_norm + 1e-12)
+        sigma = torch.matmul(u.t(), torch.matmul(weight, v)).item()
+        if sigma > margin:
+            weight.mul_(margin / sigma)
     return weight
 
 class ContrastiveRouter(nn.Module):
@@ -38,7 +29,7 @@ class ContrastiveRouter(nn.Module):
     Contrastive Router with Router Recruitment Policy (R2P) and Load Balancing Loss.
     Uses input similarity to dynamically route queries and recruit new experts.
     """
-    def __init__(self, d_in=768, d_r=128, tau_spawn=0.8, top_k=2, temp=0.1):
+    def __init__(self, d_in=768, d_r=128, tau_spawn=0.8, top_k=2, temp=1.0):
         super().__init__()
         self.d_in = d_in
         self.d_r = d_r

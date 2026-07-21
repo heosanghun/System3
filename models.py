@@ -115,10 +115,13 @@ class System3Model(nn.Module):
         
         # Shared task head
         self.head = nn.Linear(d, out_dim)
-        
+
+        # Persistent DEQ solver wrapper (transition supplied per forward call)
+        self.deq_layer = ImplicitDEQLayer(None, solver_type=solver_type, max_iter=max_iter, tol=tol)
+
         # Track dynamic spawns for optimizer updates
         self.new_expert_spawned = False
-        
+
         # Spawn the first expert initially
         self.spawn_new_expert()
 
@@ -150,7 +153,7 @@ class System3Model(nn.Module):
         print(f"--> [System 3] Expert {len(self.experts)} Spawned! Total experts = {len(self.experts)}")
 
     def get_cgm_transition(self, gates):
-        """
+        r"""
         Returns a function representing the Contractive Gated Mixture (CGM) operator.
         z_next = \sum_{i} g_i(x) f_{\theta_i}(z, x)
         This is z-independent routing which guarantees strict contraction properties.
@@ -184,18 +187,13 @@ class System3Model(nn.Module):
             # Recompute similarities and gates with the newly added expert
             gates, _, _, routing_loss = self.router(x, training=training)
             
-        # 3. Instantiate the CGM transition operator using the computed gates (detached to block task gradients)
-        transition_fn = self.get_cgm_transition(gates.detach())
-        
-        # 4. Wrap with ImplicitDEQLayer and solve for fixed point z*
-        deq_layer = ImplicitDEQLayer(
-            transition_fn, 
-            solver_type=self.solver_type, 
-            max_iter=self.max_iter, 
-            tol=self.tol
-        )
-        
-        z_star = deq_layer(x)
+        # 3. Instantiate the CGM transition operator using the computed gates.
+        # Gates depend only on x (z-independent), so contractivity (Prop. 1) holds;
+        # keeping them attached lets the router learn from the task loss.
+        transition_fn = self.get_cgm_transition(gates)
+
+        # 4. Solve for the fixed point z* through the persistent DEQ layer
+        z_star = self.deq_layer(x, f_func=transition_fn)
         
         # 5. Compute task logits
         logits = self.head(z_star)

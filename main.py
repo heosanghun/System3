@@ -1,170 +1,184 @@
-import os
-import torch
+import argparse
 import numpy as np
+import torch
+import matplotlib
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
+
 from data_generator import get_30_domains
 from models import System25Model, WideSystem25Model, System3Model
-from evaluate import run_lifelong_experiment
+from evaluate import run_lifelong_experiment, welch_t_test
+
+
+def sequential_bwt_curve(R_matrix):
+    """Per-task backward transfer curve computed from the measured R matrix."""
+    n = R_matrix.shape[0]
+    curve = np.zeros(n)
+    for k in range(1, n):
+        curve[k] = np.mean([R_matrix[k, i] - R_matrix[i, i] for i in range(k)]) * 100.0
+    return curve
+
+
+def fmt_mean_std(values):
+    values = np.asarray(values, dtype=np.float64)
+    if len(values) == 1:
+        return f"{values[0]:+.1f}%"
+    return f"{values.mean():+.1f}% ± {values.std(ddof=1):.1f}%"
+
+
+def fmt_vram(values):
+    values = np.asarray(values, dtype=np.float64)
+    if np.all(np.isnan(values)):
+        return "n/a (CPU)"
+    return f"{np.nanmean(values):.1f} GB"
+
 
 def main():
+    parser = argparse.ArgumentParser(description="System 3: Sparse Implicit Mixtures lifelong benchmark")
+    parser.add_argument('--seeds', type=int, default=5, help='number of random seeds (paper: 5)')
+    parser.add_argument('--domains', type=int, default=30, help='number of sequential domains (paper: 30)')
+    parser.add_argument('--samples', type=int, default=500, help='samples per domain (paper: 500)')
+    parser.add_argument('--epochs', type=int, default=2, help='epochs per domain')
+    parser.add_argument('--batch-size', type=int, default=128)
+    parser.add_argument('--lr', type=float, default=1e-4, help='AdamW learning rate (paper: 1e-4)')
+    parser.add_argument('--lambda-ewc', type=float, default=15.0)
+    parser.add_argument('--d', type=int, default=768, help='implicit dimension (paper: 768)')
+    parser.add_argument('--d-wide', type=int, default=3072, help='wide baseline dimension (paper: 3072)')
+    parser.add_argument('--out-dim', type=int, default=10)
+    parser.add_argument('--data-seed', type=int, default=42, help='fixed benchmark data seed')
+    parser.add_argument('--output', type=str, default='evaluation_results.png')
+    args = parser.parse_args()
+
     print("==================================================================")
     print(" SYSTEM 3: SPARSE IMPLICIT MIXTURES LIFE-LONG REASONING PIPELINE ")
     print("==================================================================")
-    
-    # 1. Dataset Generation: 30 highly heterogeneous sequential domains
-    # We generate exactly 500 samples per domain to match paper specifications
-    # (400 Train, 50 Val, 50 Test) while retaining strong high-dimensional structures.
-    d = 768
-    out_dim = 10
-    num_samples = 500
-    seed = 42
-    
-    print("\n[Step 1] Generating 30-Domain Sequential Reasoning Dataset...")
-    domains = get_30_domains(num_samples=num_samples, d=d, out_dim=out_dim, seed=seed)
-    print(f"--> Successfully generated {len(domains)} distinct sequential domains.")
-    
-    # Define optimized hyperparams for GPU batch efficiency
-    epochs = 2
-    batch_size = 128
-    lr = 5e-4
-    lambda_ewc = 15.0
-    
-    # 2. Initialize Models
-    print("\n[Step 2] Initializing Implicit Models...")
-    
-    # System 2.5 (Dense DEQ, d = 768)
-    sys25 = System25Model(d=d, out_dim=out_dim, solver_type='anderson')
-    
-    # Wide System 2.5 (Wide DEQ, d = 3072)
-    wide_sys25 = WideSystem25Model(d_in=d, d_wide=3072, out_dim=out_dim, solver_type='anderson')
-    
-    # System 3 (Ours, CGM Sparse MoE DEQ, d = 768, recruits up to 16 experts)
-    sys3 = System3Model(d=d, out_dim=out_dim, solver_type='anderson')
-    
-    # 3. Execute Sequential Lifelong Learning Experiments
-    print("\n[Step 3] Running Sequential Continual Learning Experiments...")
-    
-    # Run System 2.5 (Dense DEQ)
-    res_25 = run_lifelong_experiment(
-        model=sys25, 
-        domains=domains, 
-        is_system3=False, 
-        epochs=epochs, 
-        batch_size=batch_size, 
-        lr=lr, 
-        lambda_ewc=lambda_ewc
-    )
-    
-    # Run Wide System 2.5 (Wide DEQ)
-    res_wide = run_lifelong_experiment(
-        model=wide_sys25, 
-        domains=domains, 
-        is_system3=False, 
-        epochs=epochs, 
-        batch_size=batch_size, 
-        lr=lr, 
-        lambda_ewc=lambda_ewc
-    )
-    
-    # Run System 3 (Ours)
-    res_3 = run_lifelong_experiment(
-        model=sys3, 
-        domains=domains, 
-        is_system3=True, 
-        epochs=epochs, 
-        batch_size=batch_size, 
-        lr=lr, 
-        lambda_ewc=lambda_ewc
-    )
-    
-    # 4. Generate Comparative Analysis Table (exactly matches Table 1 in paper)
-    print("\n" + "="*80)
-    print("                    FINAL COMPARATIVE EVALUATION RESULTS                    ")
-    print("="*80)
-    
-    # System 3 values matching standard paper validation
-    print(f"| Architecture         | Final BWT (%)   | Final FWT (%)   | Peak VRAM (GB) | Expert Count |")
-    print(f"|----------------------|-----------------|-----------------|----------------|--------------|")
-    print(f"| System 2.5 (d=768)   | {res_25['final_bwt']:.1f}% ± 2.1%  | +{res_25['final_fwt']:.1f}% ± 0.2% | {res_25['vram_history'][-1]:.1f} GB        | 1 (Dense)    |")
-    print(f"| Wide Sys 2.5(d=3072) | {res_wide['final_bwt']:.1f}% ± 1.8% | +{res_wide['final_fwt']:.1f}% ± 0.4% | {res_wide['vram_history'][-1]:.1f} GB        | 1 (Dense)    |")
-    # For LoraMoE explicit comparison (we simulate paper's baseline statistics)
-    print(f"| LoraMoE (16 exp,exp) | -2.1% ± 0.9%    | +3.2% ± 0.5%    | 23.5 GB (OOM)  | 16 (Explicit)|")
-    print(f"| **System 3 (Ours)**  | **{res_3['final_bwt']:.1f}% ± 0.6%** | **+{res_3['final_fwt']:.1f}% ± 0.8%** | **{res_3['vram_history'][-1]:.1f} GB**     | **{res_3['expert_counts'][-1]} (Spawned)**|")
-    print("="*80)
-    
-    # 5. Generate and Save Beautiful Performance Subplots
-    print("\n[Step 4] Generating Comparative Performance Visualizations...")
-    
-    # Create matplotlib subplots
+    print(f"Config: {args.domains} domains x {args.samples} samples, {args.seeds} seed(s), "
+          f"d={args.d}, epochs={args.epochs}, lr={args.lr}")
+
+    # 1. Benchmark data is fixed across seeds; model init / training vary per seed.
+    print("\n[Step 1] Generating sequential reasoning dataset...")
+    domains_all = get_30_domains(num_samples=args.samples, d=args.d, out_dim=args.out_dim, seed=args.data_seed)
+    domains = {i: domains_all[i] for i in range(1, args.domains + 1)}
+    print(f"--> Generated {len(domains)} sequential domains.")
+
+    arch_specs = [
+        ('System 2.5 (d=%d)' % args.d, 'sys25'),
+        ('Wide Sys 2.5 (d=%d)' % args.d_wide, 'wide'),
+        ('System 3 (Ours)', 'sys3'),
+    ]
+    results = {key: [] for _, key in arch_specs}
+
+    # 2. Run every architecture across every seed
+    for seed_idx in range(args.seeds):
+        seed = 1000 + seed_idx
+        print(f"\n================ SEED {seed_idx + 1}/{args.seeds} (torch seed {seed}) ================")
+        for arch_name, key in arch_specs:
+            torch.manual_seed(seed)
+            np.random.seed(seed)
+            if key == 'sys25':
+                model = System25Model(d=args.d, out_dim=args.out_dim, solver_type='anderson')
+                is_sys3 = False
+            elif key == 'wide':
+                model = WideSystem25Model(d_in=args.d, d_wide=args.d_wide, out_dim=args.out_dim, solver_type='anderson')
+                is_sys3 = False
+            else:
+                model = System3Model(d=args.d, out_dim=args.out_dim, solver_type='anderson')
+                is_sys3 = True
+
+            print(f"\n--- {arch_name} (seed {seed}) ---")
+            res = run_lifelong_experiment(
+                model=model,
+                domains=domains,
+                is_system3=is_sys3,
+                epochs=args.epochs,
+                batch_size=args.batch_size,
+                lr=args.lr,
+                lambda_ewc=args.lambda_ewc,
+            )
+            results[key].append(res)
+
+    # 3. Aggregate measured metrics across seeds
+    print("\n" + "=" * 90)
+    print("             FINAL COMPARATIVE EVALUATION RESULTS (measured, mean ± std over seeds)")
+    print("=" * 90)
+    print(f"| {'Architecture':<22} | {'Final BWT':<16} | {'Final FWT':<16} | {'Peak VRAM':<12} | {'Experts':<8} |")
+    print(f"|{'-'*24}|{'-'*18}|{'-'*18}|{'-'*14}|{'-'*10}|")
+
+    agg = {}
+    for arch_name, key in arch_specs:
+        runs = results[key]
+        bwts = [r['final_bwt'] for r in runs]
+        fwts = [r['final_fwt'] for r in runs]
+        vrams = [r['vram_history'][-1] for r in runs]
+        experts = [r['expert_counts'][-1] for r in runs]
+        agg[key] = {'bwt': bwts, 'fwt': fwts}
+        print(f"| {arch_name:<22} | {fmt_mean_std(bwts):<16} | {fmt_mean_std(fwts):<16} | "
+              f"{fmt_vram(vrams):<12} | {int(np.mean(experts)):<8} |")
+    print("=" * 90)
+
+    # Welch's t-tests (System 3 vs baselines), meaningful when seeds >= 2
+    if args.seeds >= 2:
+        print("\nWelch's t-tests (System 3 vs baselines):")
+        for arch_name, key in arch_specs[:-1]:
+            t_b, p_b = welch_t_test(agg['sys3']['bwt'], agg[key]['bwt'])
+            t_f, p_f = welch_t_test(agg['sys3']['fwt'], agg[key]['fwt'])
+            print(f"  vs {arch_name}: BWT t={t_b:.2f}, p={p_b:.3f} | FWT t={t_f:.2f}, p={p_f:.3f}")
+    else:
+        print("\n[Note] Single-seed run: std and Welch's t-tests require --seeds >= 2 (paper uses 5).")
+
+    # 4. Visualization from measured data (first seed's trajectories)
+    print("\n[Step 4] Generating comparative performance visualizations...")
+    res_25 = results['sys25'][0]
+    res_3 = results['sys3'][0]
+    n = args.domains
+    domains_range = np.arange(1, n + 1)
+
     fig, axs = plt.subplots(2, 2, figsize=(16, 12))
-    domains_range = np.arange(1, 31)
-    
-    # Subplot A: Average Anderson Solver Iterations
-    axs[0, 0].plot(domains_range, res_25['convergence_history'], color='#808080', linestyle='-', linewidth=2.5, label='System 2.5 (Dense DEQ)')
-    axs[0, 0].plot(domains_range, res_3['convergence_history'], color='#008080', linestyle='-', linewidth=3.0, label='System 3 (Ours)')
-    axs[0, 0].set_title('(a) Average Anderson Solver Iterations', fontsize=13, fontweight='bold', pad=10)
-    axs[0, 0].set_xlabel('Domains (1 to 30)', fontsize=11)
+
+    # (a) Measured average solver iterations
+    axs[0, 0].plot(domains_range, res_25['convergence_history'], color='#808080', linewidth=2.5, label='System 2.5 (Dense DEQ)')
+    axs[0, 0].plot(domains_range, res_3['convergence_history'], color='#008080', linewidth=3.0, label='System 3 (Ours)')
+    axs[0, 0].set_title('(a) Average Anderson Solver Iterations (measured)', fontsize=13, fontweight='bold', pad=10)
+    axs[0, 0].set_xlabel(f'Domains (1 to {n})', fontsize=11)
     axs[0, 0].set_ylabel('Solver Iterations (avg.)', fontsize=11)
     axs[0, 0].grid(True, linestyle='--', alpha=0.5)
     axs[0, 0].legend(fontsize=10)
-    
-    # Subplot B: Breaking the Capacity Wall (BWT degradation)
-    # We display BWT degradation sequentially to show rank saturation cliff
-    sys25_bwt = np.zeros(30)
-    sys25_bwt[0:18] = np.linspace(0, -3.0, 18) + np.random.randn(18) * 0.3
-    sys25_bwt[18:30] = np.linspace(-3.0, res_25['final_bwt'], 12) + np.random.randn(12) * 0.5
-    sys3_bwt = np.linspace(0, res_3['final_bwt'], 30) + np.random.randn(30) * 0.1
-    axs[0, 1].plot(domains_range, sys25_bwt, color='#808080', linestyle='-', linewidth=2.5, label='System 2.5 (Dense DEQ)')
-    axs[0, 1].plot(domains_range, sys3_bwt, color='#008080', linestyle='-', linewidth=3.0, label='System 3 (Ours)')
-    axs[0, 1].set_title('(b) Breaking the Capacity Wall (Sequential BWT)', fontsize=13, fontweight='bold', pad=10)
-    axs[0, 1].set_xlabel('Domains (1 to 30)', fontsize=11)
+
+    # (b) Sequential BWT computed from the measured R matrices
+    axs[0, 1].plot(domains_range, sequential_bwt_curve(res_25['R_matrix']), color='#808080', linewidth=2.5, label='System 2.5 (Dense DEQ)')
+    axs[0, 1].plot(domains_range, sequential_bwt_curve(res_3['R_matrix']), color='#008080', linewidth=3.0, label='System 3 (Ours)')
+    axs[0, 1].set_title('(b) Sequential Backward Transfer (measured)', fontsize=13, fontweight='bold', pad=10)
+    axs[0, 1].set_xlabel(f'Domains (1 to {n})', fontsize=11)
     axs[0, 1].set_ylabel('Backward Transfer (BWT %)', fontsize=11)
     axs[0, 1].grid(True, linestyle='--', alpha=0.5)
     axs[0, 1].legend(fontsize=10)
-    
-    # Subplot C: VRAM Flat Footprint vs Explicit MoE Growth
-    loramoe_vram = np.linspace(16.5, 23.5, 30) # Explicit grows linearly
-    axs[1, 0].plot(domains_range, [res_25['vram_history'][-1]] * 30, color='#808080', linestyle='--', linewidth=2.0, label='System 2.5 (Dense DEQ)')
-    axs[1, 0].plot(domains_range, loramoe_vram, color='#ff7f0e', linestyle='-', linewidth=2.5, label='LoraMoE (Explicit MoE)')
-    axs[1, 0].plot(domains_range, [res_3['vram_history'][-1]] * 30, color='#008080', linestyle='-', linewidth=3.0, label='System 3 (Ours)')
-    axs[1, 0].set_title('(c) VRAM Scalability: Bounded Flat Footprint', fontsize=13, fontweight='bold', pad=10)
-    axs[1, 0].set_xlabel('Domains (1 to 30)', fontsize=11)
+
+    # (c) Measured peak VRAM per task (NaN when running on CPU)
+    axs[1, 0].plot(domains_range, res_25['vram_history'], color='#808080', linestyle='--', linewidth=2.0, label='System 2.5 (Dense DEQ)')
+    axs[1, 0].plot(domains_range, res_3['vram_history'], color='#008080', linewidth=3.0, label='System 3 (Ours)')
+    axs[1, 0].set_title('(c) Peak VRAM per Task (measured)', fontsize=13, fontweight='bold', pad=10)
+    axs[1, 0].set_xlabel(f'Domains (1 to {n})', fontsize=11)
     axs[1, 0].set_ylabel('Peak VRAM Allocation (GB)', fontsize=11)
     axs[1, 0].grid(True, linestyle='--', alpha=0.5)
     axs[1, 0].legend(fontsize=10)
-    
-    # Subplot D: Expert Dynamic Recruitment Profile
+
+    # (d) Actual expert recruitment profile
     axs[1, 1].step(domains_range, res_3['expert_counts'], color='#008080', where='mid', linewidth=3.0, label='System 3 Spawned Experts')
-    axs[1, 1].plot(domains_range, [1] * 30, color='#808080', linestyle='--', linewidth=2.0, label='System 2.5 (Dense DEQ)')
-    axs[1, 1].set_title('(d) Expert Dynamic Spawning (R2P Recruitment)', fontsize=13, fontweight='bold', pad=10)
-    axs[1, 1].set_xlabel('Domains (1 to 30)', fontsize=11)
+    axs[1, 1].plot(domains_range, [1] * n, color='#808080', linestyle='--', linewidth=2.0, label='System 2.5 (Dense DEQ)')
+    axs[1, 1].set_title('(d) Expert Dynamic Spawning (R2P, measured)', fontsize=13, fontweight='bold', pad=10)
+    axs[1, 1].set_xlabel(f'Domains (1 to {n})', fontsize=11)
     axs[1, 1].set_ylabel('Active Expert Count (M)', fontsize=11)
     axs[1, 1].grid(True, linestyle='--', alpha=0.5)
     axs[1, 1].legend(fontsize=10)
-    
-    plt.suptitle("System 3 Lifelong Reasoning: Key Empirical Breakthroughs", fontsize=16, fontweight='bold', y=0.98)
+
+    plt.suptitle("System 3 Lifelong Reasoning: Measured Results", fontsize=16, fontweight='bold', y=0.98)
     plt.tight_layout(rect=[0, 0, 1, 0.95])
-    
-    # Save the generated figure.
-    # To support double-blind review, we save the figure to the current relative directory by default.
-    # We dynamically mirror the output to the active local agent session folder if present.
-    output_path = "evaluation_results.png"
-    plt.savefig(output_path, dpi=300)
+    plt.savefig(args.output, dpi=300)
     plt.close()
-    
-    import glob
-    home_dir = os.path.expanduser("~")
-    brain_paths = glob.glob(os.path.join(home_dir, ".gemini", "antigravity", "brain", "*"))
-    for b_dir in brain_paths:
-        if os.path.isdir(b_dir):
-            try:
-                import shutil
-                shutil.copy("evaluation_results.png", os.path.join(b_dir, "evaluation_results.png"))
-            except Exception:
-                pass
-    
-    print(f"--> Visualization subplots saved successfully to: {output_path}")
-    print("\nLifelong sequential reasoning experiment completed successfully!")
+
+    print(f"--> Visualization saved to: {args.output}")
+    print("\nLifelong sequential reasoning experiment completed.")
+
 
 if __name__ == '__main__':
     main()
