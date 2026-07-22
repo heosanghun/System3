@@ -179,9 +179,10 @@ def train_single_domain(model, train_x, train_y, test_x, test_y, domain_idx, ewc
                 
                 # Check if a new expert was spawned during the forward pass novelty detection
                 if getattr(model, 'new_expert_spawned', False):
-                    # Add new expert's parameters and router's new prototype parameter to optimizer
+                    # Add new expert's parameters (and prototype, if trainable) to optimizer
                     new_expert_params = list(model.experts[-1].parameters())
-                    new_expert_params.append(model.router.prototypes[-1])
+                    if model.router.prototypes[-1].requires_grad:
+                        new_expert_params.append(model.router.prototypes[-1])
                     optimizer.add_param_group({'params': new_expert_params})
                     model.new_expert_spawned = False
                     

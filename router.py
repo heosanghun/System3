@@ -29,24 +29,34 @@ class ContrastiveRouter(nn.Module):
     Contrastive Router with Router Recruitment Policy (R2P) and Load Balancing Loss.
     Uses input similarity to dynamically route queries and recruit new experts.
     """
-    def __init__(self, d_in=768, d_r=128, tau_spawn=0.8, top_k=2, temp=1.0):
+    def __init__(self, d_in=768, d_r=128, tau_spawn=0.8, top_k=2, temp=1.0, freeze_features=True):
         super().__init__()
         self.d_in = d_in
         self.d_r = d_r
         self.tau_spawn = tau_spawn
         self.top_k = top_k
         self.temp = temp
-        
+        # When True, the projection and prototypes are frozen so routing is a
+        # fixed deterministic function of x for the whole stream. A trainable
+        # router drifts during continual training, which (measured, Run 002/003)
+        # re-triggers novelty spawning and re-routes old domains away from the
+        # experts that learned them, erasing the benefit of expert isolation.
+        # Freezing extends the paper's post-hoc router-freeze rationale
+        # (Theorem 1) to the full stream.
+        self.freeze_features = freeze_features
+
         # Router projection layer (R(x))
         self.projection = nn.Sequential(
             nn.Linear(d_in, d_r),
             nn.ReLU(),
             nn.Linear(d_r, d_r)
         )
+        if freeze_features:
+            for p in self.projection.parameters():
+                p.requires_grad_(False)
         # List of expert prototype vectors (c_i)
-        # Stored as a ParameterList so they are optimized during training
         self.prototypes = nn.ParameterList()
-        
+
     def add_prototype(self, embed):
         """
         Dynamically adds a new prototype vector c_{M+1} to the router.
@@ -54,7 +64,7 @@ class ContrastiveRouter(nn.Module):
         # Normalize to unit length
         proto_val = embed.detach().clone()
         proto_val = proto_val / (torch.norm(proto_val) + 1e-6)
-        new_proto = nn.Parameter(proto_val, requires_grad=True)
+        new_proto = nn.Parameter(proto_val, requires_grad=not self.freeze_features)
         self.prototypes.append(new_proto)
         
     def get_num_experts(self):
