@@ -136,13 +136,18 @@ class EWCManager:
         return 0.5 * self.lambda_ewc * ewc_loss
 
 
-def train_single_domain(model, train_x, train_y, test_x, test_y, domain_idx, ewc_manager, 
-                        epochs=5, batch_size=32, lr=1e-4, is_system3=False):
+def train_single_domain(model, train_x, train_y, test_x, test_y, domain_idx, ewc_manager,
+                        epochs=5, batch_size=32, lr=1e-4, is_system3=False, spawns_per_domain=1):
     """
     Trains a model on a single domain using sequential continual learning.
     Applies the task loss, load balancing loss, EWC penalty, and contractivity projections.
+    R2P recruitment is limited to `spawns_per_domain` new experts per domain,
+    matching the paper's observed dynamics (16 experts over 30 domains) and
+    preventing runaway spawning caused by router embedding drift.
     """
     model.train()
+    if is_system3 and hasattr(model, 'spawn_budget'):
+        model.spawn_budget = spawns_per_domain
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model.to(device)
     

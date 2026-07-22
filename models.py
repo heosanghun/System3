@@ -99,13 +99,20 @@ class System3Model(nn.Module):
     System 3: Sparse Implicit Mixture-of-Experts (MoE) DEQ.
     Uses Contractive Gated Mixture (CGM) to guarantee stability.
     """
-    def __init__(self, d=768, out_dim=10, solver_type='anderson', max_iter=50, tol=1e-4, margin=0.95):
+    def __init__(self, d=768, out_dim=10, solver_type='anderson', max_iter=50, tol=1e-4, margin=0.95,
+                 max_experts=32):
         super().__init__()
         self.d = d
         self.solver_type = solver_type
         self.max_iter = max_iter
         self.tol = tol
         self.margin = margin
+        # R2P spawn controls: hard capacity cap plus a per-domain budget the
+        # trainer resets at each domain boundary. Without these, router
+        # embedding drift during training re-triggers novelty detection every
+        # batch and the expert pool explodes (observed: 700+ experts).
+        self.max_experts = max_experts
+        self.spawn_budget = None  # None = unlimited (used only at init)
         
         # Contrastive Router
         self.router = ContrastiveRouter(d_in=d, d_r=128, tau_spawn=0.8, top_k=2)
@@ -182,8 +189,15 @@ class System3Model(nn.Module):
         gates, spawn_expert, mean_embed, routing_loss = self.router(x, training=training)
         
         # 2. If novelty threshold triggers spawning, perform recruitment
-        if training and spawn_expert:
+        # (subject to the per-domain spawn budget and the hard expert cap)
+        can_spawn = (
+            len(self.experts) < self.max_experts
+            and (self.spawn_budget is None or self.spawn_budget > 0)
+        )
+        if training and spawn_expert and can_spawn:
             self.spawn_new_expert(mean_embed)
+            if self.spawn_budget is not None:
+                self.spawn_budget -= 1
             # Recompute similarities and gates with the newly added expert
             gates, _, _, routing_loss = self.router(x, training=training)
             
