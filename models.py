@@ -100,7 +100,7 @@ class System3Model(nn.Module):
     Uses Contractive Gated Mixture (CGM) to guarantee stability.
     """
     def __init__(self, d=768, out_dim=10, solver_type='anderson', max_iter=50, tol=1e-4, margin=0.95,
-                 max_experts=32):
+                 max_experts=32, tau_spawn=0.07, router_temp=0.05):
         super().__init__()
         self.d = d
         self.solver_type = solver_type
@@ -114,8 +114,10 @@ class System3Model(nn.Module):
         self.max_experts = max_experts
         self.spawn_budget = None  # None = unlimited (used only at init)
         
-        # Contrastive Router
-        self.router = ContrastiveRouter(d_in=d, d_r=128, tau_spawn=0.8, top_k=2)
+        # Contrastive Router (identity features; tau_spawn calibrated from the
+        # measured own-vs-other domain similarity gap, see RESULTS.md)
+        self.router = ContrastiveRouter(d_in=d, d_r=128, tau_spawn=tau_spawn, top_k=2,
+                                        temp=router_temp, feature_mode='identity')
         
         # Expert pool (stored in a ModuleList)
         self.experts = nn.ModuleList()
@@ -128,9 +130,9 @@ class System3Model(nn.Module):
 
         # Track dynamic spawns for optimizer updates
         self.new_expert_spawned = False
-
-        # Spawn the first expert initially
-        self.spawn_new_expert()
+        # The first expert is spawned lazily on the first training forward,
+        # so its prototype is the actual embedding of the first domain batch
+        # rather than a random vector.
 
     def spawn_new_expert(self, prototype_embed=None):
         """
@@ -151,9 +153,10 @@ class System3Model(nn.Module):
         
         # Register in router
         if prototype_embed is None:
-            # First expert initialization dummy prototype
+            # Fallback dummy prototype (normally the router supplies the
+            # mean embedding of the batch that triggered the spawn)
             device = next(self.parameters()).device if next(self.parameters(), None) is not None else torch.device('cpu')
-            prototype_embed = torch.randn(128, device=device)
+            prototype_embed = torch.randn(self.router.embed_dim, device=device)
         self.router.add_prototype(prototype_embed)
         self.new_expert_spawned = True
         

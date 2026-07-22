@@ -46,6 +46,8 @@ def main():
     parser.add_argument('--d-wide', type=int, default=3072, help='wide baseline dimension (paper: 3072)')
     parser.add_argument('--out-dim', type=int, default=10)
     parser.add_argument('--data-seed', type=int, default=42, help='fixed benchmark data seed')
+    parser.add_argument('--tau-spawn', type=float, default=0.07,
+                        help='R2P novelty threshold (calibrated from measured domain separability)')
     parser.add_argument('--output', type=str, default='evaluation_results.png')
     args = parser.parse_args()
 
@@ -82,7 +84,8 @@ def main():
                 model = WideSystem25Model(d_in=args.d, d_wide=args.d_wide, out_dim=args.out_dim, solver_type='anderson')
                 is_sys3 = False
             else:
-                model = System3Model(d=args.d, out_dim=args.out_dim, solver_type='anderson')
+                model = System3Model(d=args.d, out_dim=args.out_dim, solver_type='anderson',
+                                     tau_spawn=args.tau_spawn)
                 is_sys3 = True
 
             print(f"\n--- {arch_name} (seed {seed}) ---")

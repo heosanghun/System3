@@ -29,13 +29,21 @@ class ContrastiveRouter(nn.Module):
     Contrastive Router with Router Recruitment Policy (R2P) and Load Balancing Loss.
     Uses input similarity to dynamically route queries and recruit new experts.
     """
-    def __init__(self, d_in=768, d_r=128, tau_spawn=0.8, top_k=2, temp=1.0, freeze_features=True):
+    def __init__(self, d_in=768, d_r=128, tau_spawn=0.8, top_k=2, temp=1.0, freeze_features=True,
+                 feature_mode='identity'):
         super().__init__()
         self.d_in = d_in
         self.d_r = d_r
         self.tau_spawn = tau_spawn
         self.top_k = top_k
         self.temp = temp
+        # 'identity': route on normalized raw inputs. Measured on the synthetic
+        # benchmark, per-sample similarity to the OWN domain prototype is
+        # 0.19 +- 0.14 (min 0.07) while similarity to OTHER domains is
+        # 0.00 +- 0.01 (max 0.065) — cleanly separable. A random frozen MLP
+        # projection destroys this signal (all cosine sims ~= 0.99 due to
+        # ReLU making embeddings all-positive), and a trainable one drifts.
+        self.feature_mode = feature_mode
         # When True, the projection and prototypes are frozen so routing is a
         # fixed deterministic function of x for the whole stream. A trainable
         # router drifts during continual training, which (measured, Run 002/003)
@@ -70,6 +78,10 @@ class ContrastiveRouter(nn.Module):
     def get_num_experts(self):
         return len(self.prototypes)
 
+    @property
+    def embed_dim(self):
+        return self.d_in if self.feature_mode == 'identity' else self.d_r
+
     def compute_similarities(self, x):
         """
         Computes cosine similarities between query embeddings and all expert prototypes.
@@ -77,7 +89,10 @@ class ContrastiveRouter(nn.Module):
             similarities: [batch_size, M]
             r: [batch_size, d_r] (query embeddings)
         """
-        r = self.projection(x)  # [batch_size, d_r]
+        if self.feature_mode == 'identity':
+            r = x
+        else:
+            r = self.projection(x)  # [batch_size, d_r]
         r_norm = r / (torch.norm(r, dim=-1, keepdim=True) + 1e-6)
         
         M = len(self.prototypes)
